@@ -156,6 +156,35 @@ pnpm typecheck
 pnpm build
 ```
 
+## Release
+
+Library (npm) and runner image (GHCR) are published by **separate** workflows. Do not mix them in one job.
+
+### npm (`ffp-sql-sandbox`)
+
+Workflow: [`.github/workflows/publish-npm.yml`](./.github/workflows/publish-npm.yml).
+
+**Triggers (conventional):** push of a version tag `v*` (for example `v0.1.1`). Also `workflow_dispatch`, and when a GitHub Release is published (so a Release created from that tag still publishes if the tag-push job was skipped). If `package.json`’s version is already on the registry, the job **skips** instead of force-republishing.
+
+1. Bump `version` in `package.json` (keep it in sync with the git tag; `0.1.1` is the current pin of the GHCR runner digest).
+2. Add repo secret **`NPM_TOKEN`**: **Settings → Secrets and variables → Actions → New repository secret**. Use an npm [granular access token](https://docs.npmjs.com/creating-and-viewing-access-tokens) with permission to **publish** `ffp-sql-sandbox` and **bypass 2FA**. The workflow maps it to `NODE_AUTH_TOKEN` / `.npmrc`; do not commit a token.
+3. Merge the version bump to `main`, then either:
+   - **Usual path:** `git tag v0.1.1 && git push origin v0.1.1`
+   - **Actions tab:** run **Publish npm** (`workflow_dispatch`) on the intended ref
+   - **GitHub Release:** publish a release for tag `vX.Y.Z`
+4. The job runs `pnpm install`, `pnpm test`, `pnpm build`, then `pnpm publish --access public`. A tag that does not match `package.json` version fails.
+
+`ffp-sql-sandbox@0.1.1` is not on the registry until this workflow succeeds with `NPM_TOKEN` set.
+
+### GHCR runner image
+
+Workflow: [`.github/workflows/publish-runner.yml`](./.github/workflows/publish-runner.yml) (image only; not npm).
+
+- Push to `main` that touches `sandbox/**` or that workflow file, or run **Publish runner image** (`workflow_dispatch`).
+- Pushes `ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner:v1` and `:0.1.0`, and prints the digest in the job summary.
+- After a runner change, update `DEFAULT_SANDBOX_IMAGE` to that `sha256:…` pin.
+- Anonymous `docker pull` needs the package **public** — see [GHCR package visibility](#ghcr-package-visibility).
+
 ## License
 
 MIT.

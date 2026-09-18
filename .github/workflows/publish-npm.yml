@@ -1,0 +1,94 @@
+name: Publish npm
+
+# Publishes ffp-sql-sandbox to registry.npmjs.org.
+# Usual path: bump package.json version, merge to main, push tag vX.Y.Z.
+# Also runs on workflow_dispatch and when a GitHub Release is published.
+# Already-published versions are skipped (no force republish).
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "NPM_TOKEN is not set." >&2
+            echo "Add a repo Actions secret named NPM_TOKEN: an npm granular access token with publish permission for ffp-sql-sandbox and bypass 2FA." >&2
+            exit 1
+          fi
+
+          NAME="$(node -p "require('./package.json').name")"
+          VERSION="$(node -p "require('./package.json').version")"
+
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            EXPECTED="v${VERSION}"
+            if [ "${TAG}" != "${EXPECTED}" ]; then
+              echo "Git tag '${TAG}' does not match package.json version '${VERSION}' (expected '${EXPECTED}')." >&2
+              exit 1
+            fi
+          fi
+
+          set +e
+          VIEW_OUT="$(npm view "${NAME}@${VERSION}" version 2>&1)"
+          VIEW_STATUS=$?
+          set -e
+          if [ "${VIEW_STATUS}" -eq 0 ]; then
+            echo "Note: ${NAME}@${VERSION} is already on the registry; skipping publish (idempotent, no force republish)."
+            {
+              echo "## npm publish skipped"
+              echo ""
+              echo "\`${NAME}@${VERSION}\` is already on the registry."
+            } >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          if ! grep -qiE 'E404|404 Not Found|is not in this registry' <<<"${VIEW_OUT}"; then
+            echo "npm view ${NAME}@${VERSION} failed unexpectedly:" >&2
+            echo "${VIEW_OUT}" >&2
+            exit 1
+          fi
+
+          pnpm publish --access public --no-git-checks
+          echo "Published ${NAME}@${VERSION}"
+          {
+            echo "## npm publish"
+            echo ""
+            echo "Published \`${NAME}@${VERSION}\` to https://www.npmjs.com/package/${NAME}"
+          } >> "${GITHUB_STEP_SUMMARY}"
