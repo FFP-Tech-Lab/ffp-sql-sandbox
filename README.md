@@ -1,31 +1,48 @@
 # ffp-sql-sandbox
 
-Read-only SQL sandbox primitives for Node.js: fail-fast `validateSql` plus one-shot Docker `executeSql` with hard resource, row, byte, timeout, and host-allowlist limits.
+**From First Principle** — when an LLM (or any untrusted caller) wants to run SQL, don’t trust a clever prompt. Trust a small set of checks you can name, test, and refuse to weaken.
 
-This is an FFP Tech Lab library: first-principles, read-only SQL sandbox primitives (`validateSql` plus a one-shot Docker runner) with a strict security model. It is a standalone package — host-app wiring lives in the caller; see [INTEGRATION.md](./INTEGRATION.md).
-
-## Install
+`ffp-sql-sandbox` is a Node.js library for **read-only SQL execution with hard limits**: a fail-fast `validateSql`, plus a one-shot Docker `executeSql` that enforces resource caps, dual timeouts, streaming row/byte ceilings, and a required host allowlist.
 
 ```bash
 pnpm add ffp-sql-sandbox
 ```
 
-Docker is a **hard dependency** of `executeSql`. If the engine cannot be pinged, the call fails with `DOCKER_UNAVAILABLE` rather than falling back to in-process SQL.
+Package: [npmjs.com/package/ffp-sql-sandbox](https://www.npmjs.com/package/ffp-sql-sandbox) · Org: [FFP Tech Lab](https://github.com/FFP-Tech-Lab)
 
-The default runner is published on GHCR and digest-pinned in `DEFAULT_SANDBOX_IMAGE`. Pull it (or build `sandbox/Dockerfile` locally and pass `image`, which is an untrusted override):
+---
 
-```bash
-docker pull ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner@sha256:13cc50f33c2d00a9ae464f3742c49a18a6b2750fdc39c23d68022476c79171a9
-# tags :v1 and :0.1.0 point at the same image
-docker pull ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner:v1
+## Why this exists
 
-# local build (untrusted override — pin and review if you use this)
-docker build -t ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner:v1 ./sandbox
-```
+Most “AI → SQL” stacks fail the same way: the model produces a string, something runs it, and safety is a pile of regexes plus hope. That feels productive until the first write, SSRF, or unbounded result set.
 
-If anonymous `docker pull` returns unauthorized, the GHCR package is still private — see [GHCR package visibility](#ghcr-package-visibility).
+We built this library around a different bet:
 
-## Public API
+1. **Name the proof.** If you can’t point at *what* stops a mutation or an unbounded read, you don’t have a sandbox — you have vibes.
+2. **Keep the surface small.** Two calls. No query wizard, no schema sync, no NL layer. Host apps own product UX.
+3. **Refuse soft knobs that erase the threat model.** No “just allow this DML prefix.” No password in container env. No floating `:latest` as the default trust root.
+
+FFP Tech Lab ships primitives you can reason about. This is one of them.
+
+---
+
+## Design principles
+
+| Principle | What it means here |
+| --- | --- |
+| Proof over ceremony | Safety claims map to concrete mechanisms (read-only DB role, container limits, streaming caps, host allowlist) — not to `validateSql` returning `{ ok: true }`. |
+| Fail closed | Empty allowlist denies all. Missing Docker fails loudly. Soft “fall back to in-process SQL” is not an option. |
+| Streaming limits, not post-hoc truncate | `maxRows` / `maxBytes` apply as rows arrive. Buffering the full result and then slicing is not the limits implementation. |
+| Secrets stay out of `Env` | The password goes to tmpfs (`/run/secrets/db_password`). SQL rides stdin JSON. `docker inspect` should not print credentials. |
+| Honest non-goals | We do not claim absolute network isolation, a full SQL AST, or that regex is authorization. |
+
+`validateSql` is a **cheap fail-fast** for obvious writes and multi-statement junk — not the proof. Treat `{ ok: true }` as “not obviously broken,” never as “safe to run outside this sandbox.”
+
+---
+
+## Quick start
+
+Docker is a **hard dependency** of `executeSql`.
 
 ```ts
 import {
@@ -35,102 +52,105 @@ import {
   DEFAULT_SANDBOX_IMAGE,
 } from 'ffp-sql-sandbox'
 
-validateSql(sql: string): { ok: true } | { ok: false; code: string; reason: string }
+const check = validateSql('SELECT 1')
+if (!check.ok) throw new Error(check.reason)
 
-executeSql(input: {
-  sql: string
+const result = await executeSql({
+  sql: 'SELECT 1 AS n',
   connection: {
-    type: 'postgres' | 'mysql'
-    host: string
-    port: number
-    user: string
-    password: string  // never placed in container Env
-    database: string
-  }
-  hostAllowlist: string[]  // required
-  limits?: Partial<SandboxLimits>
-  image?: string  // untrusted override; default image is digest-pinned
-}): Promise<
-  | { ok: true; data: { columns: string[]; rows: unknown[][]; truncated?: boolean } }
-  | { ok: false; code: string; error: string }
->
+    type: 'postgres', // or 'mysql'
+    host: 'db.internal',
+    port: 5432,
+    user: 'readonly_user',
+    password: process.env.DB_PASSWORD!,
+    database: 'app',
+  },
+  hostAllowlist: ['db.internal'],
+  // limits?: Partial<typeof DEFAULT_SANDBOX_LIMITS>
+  // image?: string  // untrusted override; prefer DEFAULT_SANDBOX_IMAGE
+})
+
+if (!result.ok) {
+  console.error(result.code, result.error)
+} else {
+  console.log(result.data.columns, result.data.rows)
+}
 ```
 
-`validateSql` is fail-fast only. There are no `allowPrefixes` / `forbidPatterns` options.
+Wire framework DI, secret decryption, and result mapping in the host — see [INTEGRATION.md](./INTEGRATION.md).
 
-`resolveSandboxDbHost` is **not** exported. Loopback rewrite for container DNS, if needed, stays private (and in the host adapter — see INTEGRATION.md).
+### Runner image
 
-## Non-goals
+Default runner is on GHCR, digest-pinned as `DEFAULT_SANDBOX_IMAGE`:
 
-- Natural language → SQL, query guidance, schema sync, or an AST parser as a required v1 component
-- A multi-tenant auth / connection-pool product
-- Claiming absolute network isolation (the runner uses Docker `bridge` so it can reach the allowlisted database)
-- Exporting `resolveSandboxDbHost` as public API
-- Making `validateSql` a proof of safety (it is a cheap reject, not a guarantee)
+```bash
+docker pull ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner@sha256:13cc50f33c2d00a9ae464f3742c49a18a6b2750fdc39c23d68022476c79171a9
+# convenience tags (same image): :v1 and :0.1.0 — image tags, not the npm package version
+docker pull ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner:v1
+```
 
-## Threat model
+Local build is an **untrusted** override (`image` option) — pin and review if you use it:
 
-Proof that a query cannot mutate data or exfiltrate unbounded results does **not** come from regex. v1 proof is the combination of:
+```bash
+docker build -t ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner:v1 ./sandbox
+```
 
-| Guard | What it actually does |
+---
+
+## What actually provides the proof
+
+| Guard | Role |
 | --- | --- |
-| 1. Read-only DB role | **Caller must connect as a read-only role** (and/or a `READ ONLY` transaction). The library also sets `statement_timeout` and *prefers* a read-only session (`SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` on Postgres, `SET SESSION TRANSACTION READ ONLY` on MySQL) when the dialect allows it. If that `SET` is ignored or the role can override it, the database role is still the real write barrier. |
-| 2. Container limits + dual timeout | Memory, nano-CPUs, PID cap, dropped capabilities. **Dual timeout**: the runner sets DB `statement_timeout` / `MAX_EXECUTION_TIME` to `timeoutMs`, and the host kills the container after `timeoutMs + 2000ms` if it is still running. |
-| 3. Streaming `maxRows` / `maxBytes` | The runner applies limits **as rows arrive** and stops/cancels instead of buffering the full result. The host consumer is a backstop on the live Docker attach stream. **Demux-then-truncate of a completed log buffer is not the limits implementation.** |
-| 4. `connection.host` allowlist | SSRF defense. `hostAllowlist` is required. Hosts not on the list are rejected **before** any container is created. No arbitrary hosts, no glob, no CIDR in v1 — exact match after trim + case-insensitive compare. |
+| 1. Read-only DB role | **You** connect as a read-only role (and/or `READ ONLY` transaction). The runner also prefers a read-only session and sets `statement_timeout` / `MAX_EXECUTION_TIME`. The role is still the real write barrier. |
+| 2. Container limits + dual timeout | Memory, CPU, PID caps. DB timeout **and** host kill at `timeoutMs + 2000ms`. |
+| 3. Streaming `maxRows` / `maxBytes` | Stop as data arrives; result may set `truncated: true`. |
+| 4. `hostAllowlist` | Required. Exact match (trim, case-insensitive). Empty list → deny all. Checked **before** any container is created (SSRF). |
 
-Passwords are written to a **tmpfs** file at `/run/secrets/db_password` inside the container (mode/uid for the `node` user). They are **never** placed in container `Env` (no `DB_PASS`, `PGPASSWORD`, or `MYSQL_PWD`). SQL is sent on stdin JSON, not `Cmd`, so `docker inspect` does not show the password.
+### Default limits
 
-### Default image vs custom image
+| Limit | Default |
+| --- | --- |
+| `timeoutMs` | `10000` |
+| `memoryMb` | `128` |
+| `nanoCpus` | `500000000` (0.5 CPU) |
+| `maxRows` | `1000` |
+| `maxBytes` | `1000000` |
+
+### `hostAllowlist`
+
+- Required on every `executeSql` call.
+- Allowlist the host string you pass in `connection.host`.
+- The library may privately rewrite loopback (`localhost`, `127.0.0.1`, …) to `host.docker.internal` *after* the allowlist check. That helper is **not** a public export.
+
+### Default image vs custom `image`
 
 | Image | Trust |
 | --- | --- |
-| `DEFAULT_SANDBOX_IMAGE` (`…@sha256:…`) | Digest-pinned default. Treat as the supported runner. |
-| `image` override | **Untrusted.** Allowed so callers can build locally, but a custom image can ignore streaming caps, log secrets, or exfiltrate. Pin and review your own image if you override. |
+| `DEFAULT_SANDBOX_IMAGE` (`…@sha256:…`) | Supported, digest-pinned runner. |
+| `image` override | **Untrusted.** A custom image can ignore caps or leak secrets. |
 
-The Dockerfile `FROM` line is also digest-pinned (`node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5`).
+---
 
-`DEFAULT_SANDBOX_IMAGE` is a **GHCR-pullable** digest of `ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner` (also tagged `:v1` and `:0.1.0`). `executeSql` without `image` uses that pin and returns `IMAGE_UNAVAILABLE` only if Docker cannot pull or find it (offline daemon, missing credentials while the package is private, etc.). Rebuilds of `sandbox/Dockerfile` are published by `.github/workflows/publish-runner.yml`; after a runner change, update this pin from the workflow job summary or `docker buildx imagetools inspect`.
+## Non-goals
 
-### GHCR package visibility
+- Natural language → SQL, guidance UIs, or schema sync
+- A full SQL AST as a v1 requirement
+- Multi-tenant auth / connection-pool product
+- Claiming absolute network isolation (bridge networking reaches the allowlisted DB by design)
+- Exporting host-rewrite helpers as public API
+- Treating `validateSql` as authorization
 
-New organization packages on `ghcr.io` default to **private**. Anonymous `docker pull` of `ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner` needs the package to be **public** (this cannot be undone):
+### Known `validateSql` bypass classes (fail-fast only)
 
-1. Open the package: [github.com/orgs/FFP-Tech-Lab/packages](https://github.com/orgs/FFP-Tech-Lab/packages) (or the package page linked from this repository’s **Packages** sidebar).
-2. **Package settings** → **Danger Zone** → **Change visibility** → **Public**.
-3. Org owners can allow public package *creation* under **Organization settings → Packages → Package creation**.
-
-`.github/workflows/ghcr-visibility.yml` attempts the same change via the GitHub API after publish. If that job warns, use the UI steps above.
-
-## Default limits
-
-| Limit | Default | Role |
+| Class | Example | Real guard |
 | --- | --- | --- |
-| `timeoutMs` | `10000` | DB `statement_timeout` / `MAX_EXECUTION_TIME`, plus container kill at `timeoutMs + 2000` |
-| `memoryMb` | `128` | Container memory (and memory-swap) cap |
-| `nanoCpus` | `500000000` (0.5 CPU) | Container CFS quota |
-| `maxRows` | `1000` | Streaming row cap; result may set `truncated: true` |
-| `maxBytes` | `1000000` | Streaming serialized-row / stdout byte cap; result may set `truncated: true` |
+| Writes that look like `SELECT` | `SELECT … INTO …`, side-effect functions | Read-only role |
+| Keyword false positives | `… WHERE action = 'UPDATE'` | Not an AST |
+| Comment / encoding tricks | Leading `--`, homoglyphs | Not a parser |
+| Expensive reads | `SELECT * FROM huge_table` | Timeout + streaming caps + role |
+| SQL-level network | `dblink`, FDW, `LOAD_FILE` | Locked-down role (allowlist is on `connection.host`) |
 
-## `hostAllowlist` contract
-
-- Required on every `executeSql` call.
-- Empty list → `HOST_NOT_ALLOWED` (deny all).
-- Compared against the **caller-supplied** `connection.host` (trimmed, case-insensitive). The library may rewrite loopback (`localhost`, `127.0.0.1`, `::1`, `0.0.0.0`) to `host.docker.internal` *after* the allowlist check so the container can reach a DB on the Docker host. That rewrite is private and not a public API.
-- Put the host you actually pass in on the list (e.g. `db.internal` or `localhost`). Do not accept user-controlled hosts without your own allowlist.
-
-## `validateSql` is fail-fast only (known bypasses)
-
-`validateSql` is a cheap prefix + keyword + multi-statement reject. **Do not treat a `{ ok: true }` as authorization to run SQL outside this sandbox.** Known classes:
-
-| Class | Example | Notes |
-| --- | --- | --- |
-| Writes that still look like `SELECT` | `SELECT … INTO …`, `SELECT pg_file_write(...)` | Prefix allowlist does not model Postgres side effects. **Read-only role** is the guard. |
-| False positives | `SELECT * FROM t WHERE action = 'UPDATE'` | Keyword scan is not an AST. Fail-fast, not completeness. |
-| Comment / encoding tricks | Leading `--` comments, Unicode homoglyphs | Rejected or missed; not a parser. |
-| Expensive reads | `SELECT * FROM huge_table` | Allowed by regex; stopped by timeout + `maxRows`/`maxBytes` + role. |
-| Multi-statement via protocol | Driver-level stacked queries if the runner used a naive exec | Runner sends a single query text; DB role + `READ ONLY` still apply. |
-| Network | `dblink`, `http` FDW, `LOAD_FILE` | Allowlist is on `connection.host`, not on SQL-level network functions. Use a locked-down role. |
+---
 
 ## Error codes
 
@@ -143,48 +163,54 @@ New organization packages on `ghcr.io` default to **private**. Anonymous `docker
 | `DOCKER_UNAVAILABLE` | `executeSql` |
 | `TIMEOUT` | `executeSql` |
 | `INVALID_LIMITS` | `executeSql` |
-| `IMAGE_UNPINNED` | `executeSql` (default image missing digest) |
-| `IMAGE_UNAVAILABLE` | `executeSql` (image missing locally / not pullable from GHCR) |
+| `IMAGE_UNPINNED` | `executeSql` |
+| `IMAGE_UNAVAILABLE` | `executeSql` |
 | `UNSUPPORTED_DIALECT` | `executeSql` |
 | `EXECUTION_FAILED` | `executeSql` |
+
+---
 
 ## Scripts
 
 ```bash
-pnpm test       # node:test via tsx
+pnpm test
 pnpm typecheck
 pnpm build
 ```
 
+---
+
 ## Release
 
-Library (npm) and runner image (GHCR) are published by **separate** workflows. Do not mix them in one job.
+Library (npm) and runner image (GHCR) use **separate** workflows.
 
-### npm (`ffp-sql-sandbox`)
+### npm
 
 Workflow: [`.github/workflows/publish-npm.yml`](./.github/workflows/publish-npm.yml).
 
-**Triggers (conventional):** push of a version tag `v*` (for example `v0.1.1`). Also `workflow_dispatch`, and when a GitHub Release is published (so a Release created from that tag still publishes if the tag-push job was skipped). If `package.json`’s version is already on the registry, the job **skips** instead of force-republishing.
+1. Bump `version` in `package.json` (keep in sync with the git tag).
+2. Repo secret **`NPM_TOKEN`**: npm granular token with publish + bypass 2FA.
+3. Merge to `main`, then `git tag vX.Y.Z && git push origin vX.Y.Z` (or `workflow_dispatch` / GitHub Release).
+4. Already-published versions are skipped (no force republish).
 
-1. Bump `version` in `package.json` (keep it in sync with the git tag; `0.1.1` is the current pin of the GHCR runner digest).
-2. Add repo secret **`NPM_TOKEN`**: **Settings → Secrets and variables → Actions → New repository secret**. Use an npm [granular access token](https://docs.npmjs.com/creating-and-viewing-access-tokens) with permission to **publish** `ffp-sql-sandbox` and **bypass 2FA**. The workflow maps it to `NODE_AUTH_TOKEN` / `.npmrc`; do not commit a token.
-3. Merge the version bump to `main`, then either:
-   - **Usual path:** `git tag v0.1.1 && git push origin v0.1.1`
-   - **Actions tab:** run **Publish npm** (`workflow_dispatch`) on the intended ref
-   - **GitHub Release:** publish a release for tag `vX.Y.Z`
-4. The job runs `pnpm install`, `pnpm test`, `pnpm build`, then `pnpm publish --access public`. A tag that does not match `package.json` version fails.
+Published versions: [npm](https://www.npmjs.com/package/ffp-sql-sandbox).
 
-`ffp-sql-sandbox@0.1.1` is not on the registry until this workflow succeeds with `NPM_TOKEN` set.
+### GHCR runner
 
-### GHCR runner image
+Workflow: [`.github/workflows/publish-runner.yml`](./.github/workflows/publish-runner.yml).
 
-Workflow: [`.github/workflows/publish-runner.yml`](./.github/workflows/publish-runner.yml) (image only; not npm).
+- Triggers on `sandbox/**` changes to `main` or `workflow_dispatch`.
+- Pushes `ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner:v1` (and a convenience tag such as `:0.1.0` for the image line — **not** the npm semver).
+- After a runner change, update `DEFAULT_SANDBOX_IMAGE` to the new digest from the job summary.
 
-- Push to `main` that touches `sandbox/**` or that workflow file, or run **Publish runner image** (`workflow_dispatch`).
-- Pushes `ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner:v1` and `:0.1.0`, and prints the digest in the job summary.
-- After a runner change, update `DEFAULT_SANDBOX_IMAGE` to that `sha256:…` pin.
-- Anonymous `docker pull` needs the package **public** — see [GHCR package visibility](#ghcr-package-visibility).
+Org package visibility must allow public packages for anonymous `docker pull`. If pull returns unauthorized, check [org Packages settings](https://github.com/orgs/FFP-Tech-Lab/packages) and the package’s visibility.
+
+---
 
 ## License
 
 MIT.
+
+---
+
+*Built at [FFP Tech Lab](https://github.com/FFP-Tech-Lab) — From First Principle: build from fundamentals, ship with clarity.*
