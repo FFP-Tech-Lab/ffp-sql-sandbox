@@ -83,7 +83,7 @@ Passwords are written to a **tmpfs** file at `/run/secrets/db_password` inside t
 
 The Dockerfile `FROM` line is also digest-pinned (`node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5`).
 
-Until GHCR publish, `DEFAULT_SANDBOX_IMAGE` uses a content digest of the v1 runner files. After the first registry push, replace it with `docker buildx imagetools inspect` output.
+Until GHCR publish, `DEFAULT_SANDBOX_IMAGE` is a **content digest** of the v1 runner files, not a registry-pullable image. `executeSql` without `image` will return `IMAGE_UNAVAILABLE` if that digest is not present locally. Build `sandbox/Dockerfile` and pass `image` (untrusted override), or `docker load` / retag the digest-pinned image. After the first registry push, replace the constant with `docker buildx imagetools inspect` output.
 
 ## Default limits
 
@@ -127,6 +127,7 @@ Until GHCR publish, `DEFAULT_SANDBOX_IMAGE` uses a content digest of the v1 runn
 | `TIMEOUT` | `executeSql` |
 | `INVALID_LIMITS` | `executeSql` |
 | `IMAGE_UNPINNED` | `executeSql` (default image missing digest) |
+| `IMAGE_UNAVAILABLE` | `executeSql` (image missing locally / not pullable; default digest is unpublished until GHCR) |
 | `UNSUPPORTED_DIALECT` | `executeSql` |
 | `EXECUTION_FAILED` | `executeSql` |
 
@@ -140,4 +141,4 @@ pnpm build
 
 ## License
 
-Private to FFP-Tech-Lab until made public.
+MIT. The GitHub repository may stay private until the org publishes it; that does not change the source license.

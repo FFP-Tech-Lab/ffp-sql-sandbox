@@ -160,6 +160,13 @@ export async function runInSandbox(
         error: `SQL execution timed out after ${request.timeoutMs}ms (container kill + statement_timeout)`,
       };
     }
+    if (isImageUnavailableError(err)) {
+      return {
+        ok: false,
+        code: 'IMAGE_UNAVAILABLE',
+        error: imageUnavailableMessage(request),
+      };
+    }
     return {
       ok: false,
       code: 'EXECUTION_FAILED',
@@ -194,5 +201,25 @@ function destroyStream(
   if ('destroy' in stream && typeof stream.destroy === 'function') {
     stream.destroy();
   }
+}
+
+function isImageUnavailableError(err: unknown): boolean {
+  const status =
+    typeof err === 'object' && err !== null && 'statusCode' in err
+      ? Number((err as { statusCode: unknown }).statusCode)
+      : undefined;
+  const msg = err instanceof Error ? err.message : String(err);
+  return (
+    status === 404 ||
+    /no such image/i.test(msg) ||
+    /\(HTTP code 404\).*image/i.test(msg)
+  );
+}
+
+function imageUnavailableMessage(request: DockerRunRequest): string {
+  if (request.usingDefaultImage) {
+    return `Default sandbox image is not pullable (${request.image}). Until GHCR publish, build sandbox/Dockerfile locally and pass image: '<tag-or-id>' (untrusted override), or docker load/tag the digest-pinned image.`;
+  }
+  return `Sandbox image not found: ${request.image}. Build or pull it before calling executeSql.`;
 }
 

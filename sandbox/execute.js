@@ -1,15 +1,10 @@
-import { readFileSync } from 'node:fs';
-import { stdin, stdout, stderr } from 'node:process';
+import { stdin } from 'node:process';
 import pg from 'pg';
 import mysql from 'mysql2/promise';
 import { createStreamLimiter } from './stream-limit.js';
 import { sessionSetupStatements } from './session-setup.js';
-
-const SECRET_PATH = '/run/secrets/db_password';
-
-function writeEvent(event) {
-  stdout.write(JSON.stringify(event) + '\n');
-}
+import { readPassword } from './secrets.js';
+import { writeEvent, writeRunnerError } from './events.js';
 
 async function readStdin() {
   const chunks = [];
@@ -17,17 +12,6 @@ async function readStdin() {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
   return Buffer.concat(chunks).toString('utf8');
-}
-
-function readPassword(payload) {
-  try {
-    return readFileSync(SECRET_PATH, 'utf8');
-  } catch {
-    if (typeof payload.password === 'string' && payload.password.length > 0) {
-      return payload.password;
-    }
-    throw new Error('Database password missing (expected tmpfs secret file)');
-  }
 }
 
 function envInt(name, fallback) {
@@ -231,7 +215,7 @@ async function main() {
     host: process.env.DB_HOST,
     port: envInt('DB_PORT', dialect === 'mysql' ? 3306 : 5432),
     user: process.env.DB_USER,
-    password: readPassword(payload),
+    password: readPassword(),
     database: process.env.DB_NAME,
     sql,
     timeoutMs,
@@ -246,6 +230,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  stderr.write(JSON.stringify({ type: 'error', error: err.message }) + '\n');
+  writeRunnerError(err);
   process.exit(1);
 });

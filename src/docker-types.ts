@@ -19,6 +19,7 @@ export type DockerLike = {
 
 export type DockerRunRequest = {
   image: string;
+  usingDefaultImage: boolean;
   env: string[];
   password: string;
   stdinJson: string;
@@ -31,24 +32,16 @@ export type DockerRunRequest = {
 
 /**
  * Incrementally demux Docker's 8-byte multiplexed attach stream into stdout.
- * Does not wait for the full buffer before yielding.
+ * Tty:false attach is always multiplexed — never sticky-false on a short first chunk.
  */
 export function demuxStdout(stream: AsyncIterable<Buffer | string>): PassThrough {
   const stdout = new PassThrough();
   let carry = Buffer.alloc(0);
-  let muxed: boolean | null = null;
 
   void (async () => {
     try {
       for await (const chunk of stream) {
         const incoming = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-        if (muxed === null) {
-          muxed = looksMuxed(incoming);
-        }
-        if (!muxed) {
-          stdout.write(incoming);
-          continue;
-        }
         const joined = Buffer.concat([carry, incoming]);
         const extracted = extractMuxed(joined);
         carry = Buffer.from(extracted.rest);
@@ -63,22 +56,6 @@ export function demuxStdout(stream: AsyncIterable<Buffer | string>): PassThrough
   })();
 
   return stdout;
-}
-
-function looksMuxed(chunk: Buffer): boolean {
-  if (chunk.length < 8) {
-    return false;
-  }
-  const streamType = chunk[0];
-  const size = chunk.readUInt32BE(4);
-  return (
-    (streamType === 1 || streamType === 2) &&
-    chunk[1] === 0 &&
-    chunk[2] === 0 &&
-    chunk[3] === 0 &&
-    size > 0 &&
-    size <= 16 * 1024 * 1024
-  );
 }
 
 function extractMuxed(buffer: Buffer): { stdout: Buffer; rest: Buffer } {

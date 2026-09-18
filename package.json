@@ -16,7 +16,8 @@
     "dist",
     "sandbox",
     "README.md",
-    "INTEGRATION.md"
+    "INTEGRATION.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=20"

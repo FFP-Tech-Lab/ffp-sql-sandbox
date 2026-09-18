@@ -86,6 +86,7 @@ export async function executeSql(
 
   return runInSandbox(docker, {
     image,
+    usingDefaultImage: input.image === undefined,
     env,
     password: input.connection.password,
     stdinJson: JSON.stringify({ sql: input.sql }) + '\n',

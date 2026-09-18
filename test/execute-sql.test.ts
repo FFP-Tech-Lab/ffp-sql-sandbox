@@ -267,3 +267,35 @@ describe('executeSql timeout path', () => {
     assert.equal(state.killed, true);
   });
 });
+
+describe('executeSql runner failure on stdout', () => {
+  it('returns the runner error message from stdout NDJSON, not a generic exit status', async () => {
+    const { docker } = createMockDocker({
+      stdout: '{"type":"error","error":"relation \\"t\\" does not exist"}\n',
+      statusCode: 1,
+    });
+    const result = await executeSql(baseInput(), { docker });
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.code, 'EXECUTION_FAILED');
+      assert.match(result.error, /relation "t" does not exist/);
+    }
+  });
+});
+
+describe('executeSql missing image', () => {
+  it('returns IMAGE_UNAVAILABLE when the default digest cannot be created or pulled', async () => {
+    const { docker } = createMockDocker({
+      createError: new Error(
+        '(HTTP code 404) no such image: ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner@sha256:deadbeef',
+      ),
+    });
+    const result = await executeSql(baseInput(), { docker });
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.code, 'IMAGE_UNAVAILABLE');
+      assert.match(result.error, /sandbox\/Dockerfile/);
+      assert.match(result.error, /image/i);
+    }
+  });
+});
