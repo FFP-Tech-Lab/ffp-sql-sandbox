@@ -14,7 +14,7 @@ const DIGEST_PINNED = /^.+@sha256:[a-f0-9]{64}$/i;
  * secrets.js + events.js + package.json.
  */
 export const DEFAULT_SANDBOX_IMAGE =
-  'ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner@sha256:20fdcb8e4c6d2bc73028a69f1188a42e1ebbf009dce017d9ab8dcdd93d3977d8';
+  'ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner@sha256:861dd5eb53f5c3eb468b73b6068385f0688910fc10ba68610d20bb3de9f78952';
 
 export function isDigestPinnedImage(image: string): boolean {
   return DIGEST_PINNED.test(image.trim());

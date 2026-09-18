@@ -45,17 +45,34 @@ type FakeContainer = {
 
 function createMockDocker(options: {
   stdout?: string | undefined;
+  muxFrames?: Buffer[] | undefined;
   waitMs?: number | undefined;
   statusCode?: number | undefined;
   pingError?: Error | undefined;
   createError?: Error | undefined;
   onCreate?: ((opts: Record<string, unknown>) => void) | undefined;
-}): { docker: DockerLike; state: { killed: boolean; created: Record<string, unknown> | null; putArchives: Array<{ path: string; tar: Buffer }>; env: string[] } } {
+}): {
+  docker: DockerLike;
+  state: {
+    killed: boolean;
+    killCalls: number;
+    created: Record<string, unknown> | null;
+    putArchives: Array<{ path: string; tar: Buffer }>;
+    env: string[];
+    stdinWrites: Buffer[];
+    startedAt: number | null;
+    killedAt: number | null;
+  };
+} {
   const state = {
     killed: false,
+    killCalls: 0,
     created: null as Record<string, unknown> | null,
     putArchives: [] as Array<{ path: string; tar: Buffer }>,
     env: [] as string[],
+    stdinWrites: [] as Buffer[],
+    startedAt: null as number | null,
+    killedAt: null as number | null,
   };
 
   const docker: DockerLike = {
@@ -72,11 +89,10 @@ function createMockDocker(options: {
       state.env = (createOpts.Env as string[] | undefined) ?? [];
       options.onCreate?.(createOpts);
 
-      const stdin = new PassThrough();
       let settleWait: ((status: { StatusCode: number }) => void) | undefined;
       const container: FakeContainer = {
         async start() {
-          /* started */
+          state.startedAt = Date.now();
         },
         async putArchive(tar, opts) {
           const buffer = Buffer.isBuffer(tar)
@@ -88,11 +104,14 @@ function createMockDocker(options: {
           const stream = new PassThrough();
           const pushStdout = stream.write.bind(stream);
           stream.write = ((
-            _chunk: unknown,
+            chunk: unknown,
             encoding?: unknown,
             cb?: unknown,
           ) => {
-            // Host stdin (SQL JSON). Discard so it does not mix with muxed stdout.
+            const buf = Buffer.isBuffer(chunk)
+              ? chunk
+              : Buffer.from(String(chunk), 'utf8');
+            state.stdinWrites.push(buf);
             const done = typeof encoding === 'function' ? encoding : cb;
             if (typeof done === 'function') {
               (done as (error?: Error | null) => void)();
@@ -100,14 +119,18 @@ function createMockDocker(options: {
             return true;
           }) as typeof stream.write;
           queueMicrotask(() => {
-            if (options.stdout !== undefined) {
-              pushStdout(dockerMuxFrame(1, options.stdout));
+            const frames =
+              options.muxFrames ??
+              (options.stdout !== undefined
+                ? [dockerMuxFrame(1, options.stdout)]
+                : []);
+            for (const frame of frames) {
+              pushStdout(frame);
             }
             if (options.waitMs === undefined) {
               stream.end();
             }
           });
-          void stdin;
           return stream;
         },
         wait() {
@@ -136,7 +159,9 @@ function createMockDocker(options: {
           });
         },
         async kill() {
+          state.killCalls += 1;
           state.killed = true;
+          state.killedAt = Date.now();
           settleWait?.({ StatusCode: 137 });
         },
         async remove() {
@@ -248,23 +273,51 @@ describe('executeSql Docker availability and secrets', () => {
 });
 
 describe('executeSql timeout path', () => {
-  it('kills the container when execution exceeds timeoutMs', async () => {
+  it('sets QUERY_TIMEOUT and kills the container at timeoutMs+2000', async () => {
+    const timeoutMs = 80;
     const { docker, state } = createMockDocker({
       waitMs: 30_000,
       stdout: undefined,
     });
-    const started = Date.now();
-    const result = await executeSql(
-      baseInput({ limits: { timeoutMs: 50 } }),
-      { docker },
-    );
-    const elapsed = Date.now() - started;
-    assert.ok(elapsed < 5_000, `timeout path took too long: ${elapsed}ms`);
+    const result = await executeSql(baseInput({ limits: { timeoutMs } }), {
+      docker,
+    });
+    assert.ok(state.env.includes(`QUERY_TIMEOUT=${timeoutMs}`));
     assert.equal(result.ok, false);
     if (!result.ok) {
       assert.equal(result.code, 'TIMEOUT');
     }
     assert.equal(state.killed, true);
+    assert.ok(state.startedAt !== null && state.killedAt !== null);
+    const killDelay = (state.killedAt ?? 0) - (state.startedAt ?? 0);
+    assert.ok(
+      killDelay >= timeoutMs + 1_800,
+      `container kill too early (${killDelay}ms); expected ~timeoutMs+2000`,
+    );
+    assert.ok(
+      killDelay <= timeoutMs + 2_400,
+      `container kill too late (${killDelay}ms); expected ~timeoutMs+2000`,
+    );
+  });
+});
+
+describe('executeSql stdin and env contract', () => {
+  it('writes stdinJson with only { sql } (no password field)', async () => {
+    const ndjson = [
+      '{"type":"meta","columns":["?column?"]}',
+      '{"type":"row","values":[1]}',
+      '{"type":"end","truncated":false}',
+      '',
+    ].join('\n');
+    const { docker, state } = createMockDocker({ stdout: ndjson });
+    const result = await executeSql(baseInput({ sql: 'SELECT 1' }), { docker });
+    assert.equal(result.ok, true);
+    const raw = Buffer.concat(state.stdinWrites).toString('utf8').trim();
+    const payload = JSON.parse(raw) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(payload).sort(), ['sql']);
+    assert.equal(payload.sql, 'SELECT 1');
+    assert.equal('password' in payload, false);
+    assert.equal(JSON.stringify(payload).includes(SECRET), false);
   });
 });
 
@@ -279,7 +332,88 @@ describe('executeSql runner failure on stdout', () => {
     if (!result.ok) {
       assert.equal(result.code, 'EXECUTION_FAILED');
       assert.match(result.error, /relation "t" does not exist/);
+      assert.notEqual(
+        result.error,
+        'Sandbox runner exited with a non-zero status',
+      );
     }
+  });
+
+  it('surfaces a type-2 mux error event through the host path', async () => {
+    const { docker } = createMockDocker({
+      muxFrames: [
+        dockerMuxFrame(2, '{"type":"error","error":"secret missing"}\n'),
+      ],
+      statusCode: 1,
+    });
+    const result = await executeSql(baseInput(), { docker });
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.code, 'EXECUTION_FAILED');
+      assert.equal(result.error, 'secret missing');
+      assert.notEqual(
+        result.error,
+        'Sandbox runner exited with a non-zero status',
+      );
+    }
+  });
+});
+
+describe('executeSql mux streaming truncation', () => {
+  it('sets truncated and aborts when maxRows is hit on the mux stream', async () => {
+    const lines = ['{"type":"meta","columns":["n"]}'];
+    for (let i = 0; i < 20; i += 1) {
+      lines.push(`{"type":"row","values":[${i}]}`);
+    }
+    lines.push('{"type":"end","truncated":false}', '');
+    const { docker, state } = createMockDocker({
+      muxFrames: [dockerMuxFrame(1, lines.join('\n'))],
+    });
+    const result = await executeSql(baseInput({ limits: { maxRows: 3 } }), {
+      docker,
+    });
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.data.truncated, true);
+      assert.equal(result.data.rows.length, 3);
+    }
+    assert.ok(state.killCalls >= 2);
+  });
+
+  it('sets truncated and aborts when maxBytes is hit on the mux stream', async () => {
+    const row = `{"type":"row","values":["${'n'.repeat(200)}"]}`;
+    const lines = [
+      '{"type":"meta","columns":["v"]}',
+      ...Array.from({ length: 30 }, () => row),
+      '{"type":"end","truncated":false}',
+      '',
+    ];
+    const { docker, state } = createMockDocker({
+      muxFrames: [dockerMuxFrame(1, lines.join('\n'))],
+    });
+    const result = await executeSql(baseInput({ limits: { maxBytes: 400 } }), {
+      docker,
+    });
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.data.truncated, true);
+      assert.ok(result.data.rows.length < 30);
+    }
+    assert.ok(state.killCalls >= 2);
+  });
+});
+
+describe('executeSql fail-fast skips Docker', () => {
+  it('rejects SELECT 1; SELECT 2 as MULTI_STATEMENT without creating a container', async () => {
+    const { docker, state } = createMockDocker({ stdout: '' });
+    const result = await executeSql(baseInput({ sql: 'SELECT 1; SELECT 2' }), {
+      docker,
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.code, 'MULTI_STATEMENT');
+    }
+    assert.equal(state.created, null);
   });
 });
 

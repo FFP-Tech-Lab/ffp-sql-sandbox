@@ -9,9 +9,12 @@ import { encodeRunnerEvent, writeRunnerError } from '../sandbox/events.js';
 import { consumeNdjsonResult } from '../src/stream-consumer.js';
 
 describe('readPassword tmpfs-only', () => {
-  it('does not accept a payload.password fallback when the secret file is missing', () => {
+  it('throws when the secret file is missing even if payload.password is present', () => {
     assert.throws(
-      () => readPassword('/no/such/ffp-sql-sandbox-secret'),
+      () =>
+        readPassword('/no/such/ffp-sql-sandbox-secret', {
+          password: 'from-stdin-payload',
+        }),
       /tmpfs secret file/,
     );
   });

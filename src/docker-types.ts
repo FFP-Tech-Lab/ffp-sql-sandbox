@@ -31,8 +31,10 @@ export type DockerRunRequest = {
 };
 
 /**
- * Incrementally demux Docker's 8-byte multiplexed attach stream into stdout.
- * Tty:false attach is always multiplexed — never sticky-false on a short first chunk.
+ * Incrementally demux Docker's 8-byte multiplexed attach stream.
+ * Tty:false attach is always multiplexed — buffer until a full 8-byte header.
+ * Type-1 (stdout) and type-2 (stderr) payloads are forwarded to the NDJSON
+ * consumer so runner `{type:"error"}` events are not dropped.
  */
 export function demuxStdout(stream: AsyncIterable<Buffer | string>): PassThrough {
   const stdout = new PassThrough();
@@ -68,7 +70,7 @@ function extractMuxed(buffer: Buffer): { stdout: Buffer; rest: Buffer } {
     }
     const streamType = buffer[offset];
     const payload = buffer.subarray(offset + 8, offset + 8 + size);
-    if (streamType === 1) {
+    if (streamType === 1 || streamType === 2) {
       stdoutChunks.push(payload);
     }
     offset += 8 + size;

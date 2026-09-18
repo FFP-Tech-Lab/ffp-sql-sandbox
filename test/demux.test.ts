@@ -20,13 +20,15 @@ async function collect(stream: AsyncIterable<Buffer | string>): Promise<Buffer> 
 }
 
 describe('demuxStdout (Tty:false always multiplexed)', () => {
-  it('buffers a first chunk shorter than 8 bytes instead of treating the stream as raw', async () => {
+  it('does not stick as non-mux when the first chunk is <8 bytes, then a type-1 frame body', async () => {
     const payload = '{"type":"meta","columns":["n"]}\n{"type":"row","values":[1]}\n';
     const frame = dockerMuxFrame(1, payload);
-    const stream = Readable.from([frame.subarray(0, 3), frame.subarray(3)]);
+    assert.ok(frame.length > 8);
+    const stream = Readable.from([frame.subarray(0, 5), frame.subarray(5)]);
     const output = await collect(demuxStdout(stream));
     assert.equal(output.toString('utf8'), payload);
     assert.equal(output[0], '{'.charCodeAt(0));
+    assert.notEqual(output[0], 1);
   });
 
   it('reassembles a mux frame split across many tiny chunks', async () => {
@@ -40,12 +42,10 @@ describe('demuxStdout (Tty:false always multiplexed)', () => {
     assert.equal(output.toString('utf8'), payload);
   });
 
-  it('drops stderr mux frames so runner errors must arrive on stdout', async () => {
-    const stderrOnly = dockerMuxFrame(
-      2,
-      '{"type":"error","error":"secret missing"}\n',
-    );
-    const output = await collect(demuxStdout(Readable.from([stderrOnly])));
-    assert.equal(output.length, 0);
+  it('forwards type-2 mux error NDJSON to the consumer', async () => {
+    const errorLine = '{"type":"error","error":"secret missing"}\n';
+    const stderrFrame = dockerMuxFrame(2, errorLine);
+    const output = await collect(demuxStdout(Readable.from([stderrFrame])));
+    assert.equal(output.toString('utf8'), errorLine);
   });
 });
