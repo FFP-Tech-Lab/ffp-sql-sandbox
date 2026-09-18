@@ -2,7 +2,7 @@
 
 Read-only SQL sandbox primitives for Node.js: fail-fast `validateSql` plus one-shot Docker `executeSql` with hard resource, row, byte, timeout, and host-allowlist limits.
 
-This is the v1 library extracted from the sandbox ideas in [ChuTingzj/ai-bi](https://github.com/ChuTingzj/ai-bi) (`validateSql` + dockerode one-shot container) and redesigned around a stricter security model. It is **not** wired into ai-bi in this repository — see [INTEGRATION.md](./INTEGRATION.md).
+This is an FFP Tech Lab library: first-principles, read-only SQL sandbox primitives (`validateSql` plus a one-shot Docker runner) with a strict security model. It is a standalone package — host-app wiring lives in the caller; see [INTEGRATION.md](./INTEGRATION.md).
 
 ## Install
 
@@ -58,7 +58,7 @@ executeSql(input: {
 
 `validateSql` is fail-fast only. There are no `allowPrefixes` / `forbidPatterns` options.
 
-`resolveSandboxDbHost` is **not** exported. Loopback rewrite for container DNS, if needed, stays private (and, for ai-bi, in the adapter — see INTEGRATION.md).
+`resolveSandboxDbHost` is **not** exported. Loopback rewrite for container DNS, if needed, stays private (and in the host adapter — see INTEGRATION.md).
 
 ## Non-goals
 
