@@ -8,7 +8,10 @@ import type { DockerLike } from '../src/docker-executor.js';
 describe('default image digest pin', () => {
   it('pins the default runner image by sha256 digest', () => {
     assert.equal(isDigestPinnedImage(DEFAULT_SANDBOX_IMAGE), true);
-    assert.match(DEFAULT_SANDBOX_IMAGE, /@sha256:[a-f0-9]{64}$/);
+    assert.match(
+      DEFAULT_SANDBOX_IMAGE,
+      /^ghcr\.io\/ffp-tech-lab\/ffp-sql-sandbox-runner@sha256:[a-f0-9]{64}$/,
+    );
   });
 
   it('pins the runner Dockerfile FROM line by digest', () => {

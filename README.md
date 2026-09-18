@@ -12,11 +12,18 @@ pnpm add ffp-sql-sandbox
 
 Docker is a **hard dependency** of `executeSql`. If the engine cannot be pinged, the call fails with `DOCKER_UNAVAILABLE` rather than falling back to in-process SQL.
 
-Build the runner image from `sandbox/Dockerfile` (digest-pinned `FROM`) and either publish it at the default ref below or pass `image` (untrusted override).
+The default runner is published on GHCR and digest-pinned in `DEFAULT_SANDBOX_IMAGE`. Pull it (or build `sandbox/Dockerfile` locally and pass `image`, which is an untrusted override):
 
 ```bash
+docker pull ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner@sha256:13cc50f33c2d00a9ae464f3742c49a18a6b2750fdc39c23d68022476c79171a9
+# tags :v1 and :0.1.0 point at the same image
+docker pull ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner:v1
+
+# local build (untrusted override — pin and review if you use this)
 docker build -t ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner:v1 ./sandbox
 ```
+
+If anonymous `docker pull` returns unauthorized, the GHCR package is still private — see [GHCR package visibility](#ghcr-package-visibility).
 
 ## Public API
 
@@ -83,7 +90,17 @@ Passwords are written to a **tmpfs** file at `/run/secrets/db_password` inside t
 
 The Dockerfile `FROM` line is also digest-pinned (`node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5`).
 
-Until GHCR publish, `DEFAULT_SANDBOX_IMAGE` is a **content digest** of the v1 runner files, not a registry-pullable image. `executeSql` without `image` will return `IMAGE_UNAVAILABLE` if that digest is not present locally. Build `sandbox/Dockerfile` and pass `image` (untrusted override), or `docker load` / retag the digest-pinned image. After the first registry push, replace the constant with `docker buildx imagetools inspect` output.
+`DEFAULT_SANDBOX_IMAGE` is a **GHCR-pullable** digest of `ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner` (also tagged `:v1` and `:0.1.0`). `executeSql` without `image` uses that pin and returns `IMAGE_UNAVAILABLE` only if Docker cannot pull or find it (offline daemon, missing credentials while the package is private, etc.). Rebuilds of `sandbox/Dockerfile` are published by `.github/workflows/publish-runner.yml`; after a runner change, update this pin from the workflow job summary or `docker buildx imagetools inspect`.
+
+### GHCR package visibility
+
+New organization packages on `ghcr.io` default to **private**. Anonymous `docker pull` of `ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner` needs the package to be **public** (this cannot be undone):
+
+1. Open the package: [github.com/orgs/FFP-Tech-Lab/packages](https://github.com/orgs/FFP-Tech-Lab/packages) (or the package page linked from this repository’s **Packages** sidebar).
+2. **Package settings** → **Danger Zone** → **Change visibility** → **Public**.
+3. Org owners can allow public package *creation* under **Organization settings → Packages → Package creation**.
+
+`.github/workflows/ghcr-visibility.yml` attempts the same change via the GitHub API after publish. If that job warns, use the UI steps above.
 
 ## Default limits
 
@@ -127,7 +144,7 @@ Until GHCR publish, `DEFAULT_SANDBOX_IMAGE` is a **content digest** of the v1 ru
 | `TIMEOUT` | `executeSql` |
 | `INVALID_LIMITS` | `executeSql` |
 | `IMAGE_UNPINNED` | `executeSql` (default image missing digest) |
-| `IMAGE_UNAVAILABLE` | `executeSql` (image missing locally / not pullable; default digest is unpublished until GHCR) |
+| `IMAGE_UNAVAILABLE` | `executeSql` (image missing locally / not pullable from GHCR) |
 | `UNSUPPORTED_DIALECT` | `executeSql` |
 | `EXECUTION_FAILED` | `executeSql` |
 
@@ -141,4 +158,4 @@ pnpm build
 
 ## License
 
-MIT. The GitHub repository may stay private until the org publishes it; that does not change the source license.
+MIT.

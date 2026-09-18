@@ -218,7 +218,7 @@ function isImageUnavailableError(err: unknown): boolean {
 
 function imageUnavailableMessage(request: DockerRunRequest): string {
   if (request.usingDefaultImage) {
-    return `Default sandbox image is not pullable (${request.image}). Until GHCR publish, build sandbox/Dockerfile locally and pass image: '<tag-or-id>' (untrusted override), or docker load/tag the digest-pinned image.`;
+    return `Default sandbox image is not pullable (${request.image}). Pull ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner@sha256:<digest> (or :v1), or build sandbox/Dockerfile locally and pass image: '<tag-or-id>' (untrusted override). If docker pull is unauthorized, the GHCR package may still be private.`;
   }
   return `Sandbox image not found: ${request.image}. Build or pull it before calling executeSql.`;
 }
