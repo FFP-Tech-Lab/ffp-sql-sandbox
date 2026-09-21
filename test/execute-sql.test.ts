@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { PassThrough } from 'node:stream';
 import { describe, it } from 'node:test';
 import { executeSql } from '../src/execute-sql.js';
@@ -39,7 +39,7 @@ function dockerMuxFrame(streamType: 1 | 2, payload: string): Buffer {
 }
 
 type FakeContainer = {
-  start: () => Promise<void>;
+  start: (opts?: unknown) => Promise<void>;
   putArchive: (tar: Buffer | NodeJS.ReadableStream, opts: { path: string }) => Promise<void>;
   attach: (opts: unknown) => Promise<PassThrough>;
   wait: () => Promise<{ StatusCode: number }>;
@@ -67,6 +67,7 @@ function createMockDocker(options: {
     stdinWrites: Buffer[];
     startedAt: number | null;
     killedAt: number | null;
+    startOpts: unknown;
   };
 } {
   const state = {
@@ -78,6 +79,7 @@ function createMockDocker(options: {
     stdinWrites: [] as Buffer[],
     startedAt: null as number | null,
     killedAt: null as number | null,
+    startOpts: undefined as unknown,
   };
 
   const docker: DockerLike = {
@@ -96,7 +98,8 @@ function createMockDocker(options: {
 
       let settleWait: ((status: { StatusCode: number }) => void) | undefined;
       const container: FakeContainer = {
-        async start() {
+        async start(opts?: unknown) {
+          state.startOpts = opts;
           state.startedAt = Date.now();
         },
         async putArchive(tar, opts) {
@@ -274,11 +277,12 @@ describe('executeSql Docker availability and secrets', () => {
     const result = await executeSql(baseInput(), { docker });
     assert.equal(result.ok, true);
     assert.ok(state.env.length > 0);
-    for (const entry of state.env) {
-      assert.doesNotMatch(entry, /PASS/i);
-      assert.equal(entry.includes(SECRET), false);
-    }
-    const inspectDump = JSON.stringify(state.created);
+    assertNoPasswordInEnv(state.env);
+    assertNoPasswordInEnv(envFromUnknown(state.startOpts));
+    const inspectDump = JSON.stringify({
+      created: state.created,
+      startOpts: state.startOpts,
+    });
     assert.equal(inspectDump.includes(SECRET), false);
     const visible = filesVisibleAfterStart({
       createOpts: state.created,
@@ -297,6 +301,64 @@ describe('executeSql Docker availability and secrets', () => {
     );
     assert.equal(secretMount?.Type, 'bind');
     assert.equal(secretMount?.ReadOnly, true);
+  });
+
+  it('bind-mounts a host temp file read-only at /run/secrets/db_password (not putArchive)', async () => {
+    const ndjson = [
+      '{"type":"meta","columns":["?column?"]}',
+      '{"type":"row","values":[1]}',
+      '{"type":"end","truncated":false}',
+      '',
+    ].join('\n');
+    let sourceIsFile = false;
+    let sourceContent: string | undefined;
+    const { docker, state } = createMockDocker({
+      stdout: ndjson,
+      onCreate(opts) {
+        const source = bindSourceForSecret(opts);
+        assert.equal(typeof source, 'string');
+        assert.ok(source);
+        sourceIsFile = statSync(source).isFile();
+        sourceContent = readFileSync(source, 'utf8');
+      },
+    });
+    const result = await executeSql(baseInput(), { docker });
+    assert.equal(result.ok, true);
+    assert.equal(
+      sourceIsFile,
+      true,
+      'secret Source must be a host file, not a directory',
+    );
+    assert.equal(sourceContent, SECRET);
+
+    const hostConfig = (state.created?.HostConfig ?? {}) as {
+      Tmpfs?: Record<string, string>;
+      Mounts?: Array<{
+        Type?: string;
+        Source?: string;
+        Target?: string;
+        ReadOnly?: boolean;
+      }>;
+    };
+    const secretMount = (hostConfig.Mounts ?? []).find(
+      (mount) => mount.Target === '/run/secrets/db_password',
+    );
+    assert.equal(secretMount?.Type, 'bind');
+    assert.equal(secretMount?.ReadOnly, true);
+    assert.equal(secretMount?.Target, '/run/secrets/db_password');
+    assert.equal(
+      state.putArchives.length,
+      0,
+      'putArchive writes under mounts and is not a valid secret delivery path',
+    );
+    const tmpfsCoversSecrets = Object.keys(hostConfig.Tmpfs ?? {}).some(
+      (target) =>
+        target === '/run/secrets' ||
+        target === '/run/secrets/' ||
+        target === '/run/secrets/db_password',
+    );
+    assert.equal(tmpfsCoversSecrets, false);
+    assertNoPasswordInEnv(state.env);
   });
 
   it('does not hide the password under a tmpfs mount of /run/secrets via putArchive', async () => {
@@ -360,6 +422,28 @@ describe('executeSql Docker availability and secrets', () => {
     assert.equal(existsSync(secretSource ?? ''), false);
   });
 });
+
+function assertNoPasswordInEnv(env: string[]): void {
+  for (const entry of env) {
+    assert.doesNotMatch(
+      entry,
+      /^(?:DB_PASS|DB_PASSWORD|PGPASSWORD|MYSQL_PWD|PASSWORD)=/i,
+    );
+    assert.doesNotMatch(entry, /PASS/i);
+    assert.equal(entry.includes(SECRET), false);
+  }
+}
+
+function envFromUnknown(value: unknown): string[] {
+  if (typeof value !== 'object' || value === null || !('Env' in value)) {
+    return [];
+  }
+  const env = (value as { Env?: unknown }).Env;
+  if (!Array.isArray(env)) {
+    return [];
+  }
+  return env.filter((entry): entry is string => typeof entry === 'string');
+}
 
 function bindSourceForSecret(
   createOpts: Record<string, unknown>,
