@@ -148,10 +148,20 @@ describe('Postgres query stream meta columns (pg 8.x result.fields)', () => {
 });
 
 describe('MySQL path is unchanged', () => {
-  it('still emits meta from the mysql2 fields event in execute.js', () => {
-    const src = readFileSync(new URL('../sandbox/execute.js', import.meta.url), 'utf8');
-    assert.match(src, /streamPgQuery\(/);
-    const mysqlFn = src.slice(src.indexOf('function streamMysql'));
+  it('still emits meta from the mysql2 fields event', () => {
+    const executeSrc = readFileSync(
+      new URL('../sandbox/execute.js', import.meta.url),
+      'utf8',
+    );
+    const mysqlSrc = readFileSync(
+      new URL('../sandbox/mysql-query-stream.js', import.meta.url),
+      'utf8',
+    );
+    const mysqlFn = mysqlSrc.slice(
+      mysqlSrc.indexOf('export function streamMysqlQuery'),
+      mysqlSrc.indexOf('export async function runMysqlQuery'),
+    );
+    assert.match(executeSrc, /runMysqlQuery\(/);
     assert.match(mysqlFn, /query\.on\(\s*['"]fields['"]/);
     assert.doesNotMatch(mysqlFn, /result\.fields/);
   });

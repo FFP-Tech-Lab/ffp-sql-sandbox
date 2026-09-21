@@ -30,15 +30,20 @@ export type DockerRunRequest = {
   maxBytes: number;
 };
 
+type MuxFrame = { streamType: number; payload: Buffer };
+
 /**
  * Incrementally demux Docker's 8-byte multiplexed attach stream.
  * Tty:false attach is always multiplexed — buffer until a full 8-byte header.
- * Type-1 (stdout) and type-2 (stderr) payloads are forwarded to the NDJSON
- * consumer so runner `{type:"error"}` events are not dropped.
+ * Type-1 (stdout) and type-2 (stderr) are forwarded as **complete lines** so a
+ * stderr frame cannot splice bytes into the middle of a stdout NDJSON event.
+ * Runner `{type:"error"}` events on either stream are still delivered.
  */
 export function demuxStdout(stream: AsyncIterable<Buffer | string>): PassThrough {
   const stdout = new PassThrough();
   let carry = Buffer.alloc(0);
+  let stdoutTail: Buffer = Buffer.alloc(0);
+  let stderrTail: Buffer = Buffer.alloc(0);
 
   void (async () => {
     try {
@@ -47,10 +52,16 @@ export function demuxStdout(stream: AsyncIterable<Buffer | string>): PassThrough
         const joined = Buffer.concat([carry, incoming]);
         const extracted = extractMuxed(joined);
         carry = Buffer.from(extracted.rest);
-        if (extracted.stdout.length > 0) {
-          stdout.write(extracted.stdout);
+        for (const frame of extracted.frames) {
+          if (frame.streamType === 1) {
+            stdoutTail = emitCompleteLines(stdout, stdoutTail, frame.payload);
+          } else if (frame.streamType === 2) {
+            stderrTail = emitCompleteLines(stdout, stderrTail, frame.payload);
+          }
         }
       }
+      flushTail(stdout, stdoutTail);
+      flushTail(stdout, stderrTail);
       stdout.end();
     } catch (err) {
       stdout.destroy(err instanceof Error ? err : new Error(String(err)));
@@ -60,23 +71,47 @@ export function demuxStdout(stream: AsyncIterable<Buffer | string>): PassThrough
   return stdout;
 }
 
-function extractMuxed(buffer: Buffer): { stdout: Buffer; rest: Buffer } {
-  const stdoutChunks: Buffer[] = [];
+function emitCompleteLines(
+  out: PassThrough,
+  tail: Buffer,
+  payload: Buffer,
+): Buffer {
+  const joined = Buffer.concat([tail, payload]);
+  let start = 0;
+  for (let i = 0; i < joined.length; i += 1) {
+    if (joined[i] === 0x0a) {
+      out.write(joined.subarray(start, i + 1));
+      start = i + 1;
+    }
+  }
+  return Buffer.from(joined.subarray(start));
+}
+
+function flushTail(out: PassThrough, tail: Buffer): void {
+  if (tail.length === 0) {
+    return;
+  }
+  out.write(tail);
+  if (tail[tail.length - 1] !== 0x0a) {
+    out.write('\n');
+  }
+}
+
+function extractMuxed(buffer: Buffer): { frames: MuxFrame[]; rest: Buffer } {
+  const frames: MuxFrame[] = [];
   let offset = 0;
   while (offset + 8 <= buffer.length) {
     const size = buffer.readUInt32BE(offset + 4);
     if (offset + 8 + size > buffer.length) {
       break;
     }
-    const streamType = buffer[offset];
+    const streamType = buffer[offset] ?? 0;
     const payload = buffer.subarray(offset + 8, offset + 8 + size);
-    if (streamType === 1 || streamType === 2) {
-      stdoutChunks.push(payload);
-    }
+    frames.push({ streamType, payload });
     offset += 8 + size;
   }
   return {
-    stdout: Buffer.concat(stdoutChunks),
+    frames,
     rest: buffer.subarray(offset),
   };
 }

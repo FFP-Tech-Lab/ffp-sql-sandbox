@@ -56,6 +56,7 @@ function createMockDocker(options: {
   pingError?: Error | undefined;
   createError?: Error | undefined;
   onCreate?: ((opts: Record<string, unknown>) => void) | undefined;
+  killSettlesWait?: boolean | undefined;
 }): {
   docker: DockerLike;
   state: {
@@ -170,7 +171,9 @@ function createMockDocker(options: {
           state.killCalls += 1;
           state.killed = true;
           state.killedAt = Date.now();
-          settleWait?.({ StatusCode: 137 });
+          if (options.killSettlesWait !== false) {
+            settleWait?.({ StatusCode: 137 });
+          }
         },
         async remove() {
           /* removed */
@@ -474,6 +477,48 @@ function bindSourceForSecret(
 }
 
 describe('executeSql timeout path', () => {
+  it('maps a runner QUERY_TIMEOUT error event to TIMEOUT (not a JSON parse crash)', async () => {
+    const { docker } = createMockDocker({
+      stdout: '{"type":"error","error":"QUERY_TIMEOUT after 80ms"}\n',
+      statusCode: 1,
+    });
+    const result = await executeSql(baseInput({ limits: { timeoutMs: 80 } }), {
+      docker,
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.code, 'TIMEOUT');
+      assert.match(result.error, /QUERY_TIMEOUT|timed out/i);
+      assert.doesNotMatch(result.error, /Unexpected non-whitespace character after JSON/);
+    }
+  });
+
+  it('maps MySQL "Query execution was interrupted" to TIMEOUT', async () => {
+    const { docker } = createMockDocker({
+      stdout:
+        '{"type":"error","error":"Query execution was interrupted"}\n',
+      statusCode: 1,
+    });
+    const result = await executeSql(
+      baseInput({
+        connection: {
+          type: 'mysql',
+          host: 'db.internal',
+          port: 3306,
+          user: 'readonly',
+          password: SECRET,
+          database: 'app',
+        },
+        limits: { timeoutMs: 80 },
+      }),
+      { docker },
+    );
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.code, 'TIMEOUT');
+    }
+  });
+
   it('sets QUERY_TIMEOUT and kills the container at timeoutMs+2000', async () => {
     const timeoutMs = 80;
     const { docker, state } = createMockDocker({
@@ -601,6 +646,67 @@ describe('executeSql mux streaming truncation', () => {
       assert.ok(result.data.rows.length < 30);
     }
     assert.ok(state.killCalls >= 2);
+  });
+
+  it('returns truncated without waiting for container wait() after maxRows abort', async () => {
+    const lines = ['{"type":"meta","columns":["n"]}'];
+    for (let i = 0; i < 20; i += 1) {
+      lines.push(`{"type":"row","values":[${i}]}`);
+    }
+    lines.push('{"type":"end","truncated":false}', '');
+    const timeoutMs = 80;
+    const started = Date.now();
+    const { docker } = createMockDocker({
+      muxFrames: [dockerMuxFrame(1, lines.join('\n'))],
+      waitMs: 30_000,
+      killSettlesWait: false,
+    });
+    const result = await executeSql(
+      baseInput({ limits: { timeoutMs, maxRows: 3 } }),
+      { docker },
+    );
+    const elapsed = Date.now() - started;
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.data.truncated, true);
+      assert.equal(result.data.rows.length, 3);
+    }
+    assert.ok(
+      elapsed < 500,
+      `maxRows abort hung ${elapsed}ms waiting for wait()/kill margin`,
+    );
+  });
+
+  it('keeps stdout NDJSON parseable when stderr splits a JSON line', async () => {
+    const meta = '{"type":"meta","columns":["SLEEP(15)"]}\n';
+    const rest =
+      '{"type":"row","values":[0]}\n{"type":"end","truncated":false}\n';
+    const { docker } = createMockDocker({
+      muxFrames: [
+        dockerMuxFrame(1, meta.slice(0, 20)),
+        dockerMuxFrame(2, 'mysqld: got signal 9\n'),
+        dockerMuxFrame(1, meta.slice(20) + rest),
+      ],
+    });
+    const result = await executeSql(
+      baseInput({
+        sql: 'SELECT SLEEP(15)',
+        connection: {
+          type: 'mysql',
+          host: 'db.internal',
+          port: 3306,
+          user: 'readonly',
+          password: SECRET,
+          database: 'app',
+        },
+      }),
+      { docker },
+    );
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.deepEqual(result.data.columns, ['SLEEP(15)']);
+      assert.deepEqual(result.data.rows, [[0]]);
+    }
   });
 });
 

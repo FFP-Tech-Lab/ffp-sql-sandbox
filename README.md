@@ -102,7 +102,7 @@ docker build -t ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner:v1 ./sandbox
 | Guard | Role |
 | --- | --- |
 | 1. Read-only DB role | **You** connect as a read-only role (and/or `READ ONLY` transaction). The runner also prefers a read-only session and sets `statement_timeout` / `MAX_EXECUTION_TIME`. The role is still the real write barrier. |
-| 2. Container limits + dual timeout | Memory, CPU, PID caps. DB timeout **and** host kill at `timeoutMs + 2000ms`. |
+| 2. Container limits + dual timeout | Memory, CPU, PID caps. Query wall-clock at `timeoutMs` **and** host kill at `timeoutMs + 2000ms`. See [Timeout behavior](#timeout-behavior-postgres-vs-mysql). |
 | 3. Streaming `maxRows` / `maxBytes` | Stop as data arrives; result may set `truncated: true`. |
 | 4. `hostAllowlist` | Required. Exact match (trim, case-insensitive). Empty list → deny all. Checked **before** any container is created (SSRF). |
 
@@ -115,6 +115,26 @@ docker build -t ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner:v1 ./sandbox
 | `nanoCpus` | `500000000` (0.5 CPU) |
 | `maxRows` | `1000` |
 | `maxBytes` | `1000000` |
+
+### Timeout behavior (Postgres vs MySQL)
+
+Dual timeout, by design:
+
+1. **Query timeout at `timeoutMs`** (`QUERY_TIMEOUT` in the runner).
+2. **Host container kill at `timeoutMs + 2000ms`** if the runner has not exited (documented kill margin).
+
+These are **not** equivalent across dialects:
+
+| Dialect | In-engine statement timeout | Interrupts `SLEEP` / `pg_sleep`? |
+| --- | --- | --- |
+| Postgres | `SET statement_timeout = timeoutMs` (also `pg` `statement_timeout`) | **Yes** — `pg_sleep(15)` is cancelled. |
+| MySQL | `SET SESSION MAX_EXECUTION_TIME = timeoutMs` (milliseconds) | **No** — `MAX_EXECUTION_TIME` does not abort `SLEEP()`. `SELECT SLEEP(15)` would otherwise return success at 15s. |
+
+For MySQL, the runner therefore also starts a **wall-clock watchdog at `timeoutMs`** that `destroy()`s the client socket (server-side query abort on disconnect). `SELECT SLEEP(15)` with `timeoutMs: 10000` / `SANDBOX_TIMEOUT_MS=10000` must fail with `TIMEOUT` around 10s, not `{ ok: true }` at 15s.
+
+On timeout or kill, attach stdout/stderr are demuxed **line-by-line per stream** so a stderr frame cannot splice into the middle of an NDJSON event (`Unexpected non-whitespace character after JSON`). Host maps runner `QUERY_TIMEOUT` / `Query execution was interrupted` / Postgres `statement timeout` to `code: 'TIMEOUT'`.
+
+Streaming `maxRows` / `maxBytes` abort must return `{ truncated: true }` as soon as the consumer hits the cap — it must not wait for `container.wait()` or the kill margin.
 
 ### `hostAllowlist`
 

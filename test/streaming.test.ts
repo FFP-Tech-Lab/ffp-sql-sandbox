@@ -115,4 +115,16 @@ describe('streaming maxRows / maxBytes (host consumer backstop)', () => {
     assert.equal(result.truncated, true);
     assert.equal(aborted, true);
   });
+
+  it('does not throw when a line is concatenated JSON (mux corruption backstop)', async () => {
+    const line =
+      '{"type":"meta","columns":["SLEEP(15)"]}{"type":"row","values":[0]}\n';
+    const stream = Readable.from([Buffer.from(line, 'utf8')]);
+    const result = await consumeNdjsonResult(stream, {
+      maxRows: 10,
+      maxBytes: 1_000_000,
+      abort: () => undefined,
+    });
+    assert.equal(result.error, undefined);
+  });
 });

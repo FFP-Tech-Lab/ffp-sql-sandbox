@@ -17,6 +17,7 @@ describe('runner session setup (read-only + statement_timeout)', () => {
       'SET SESSION TRANSACTION READ ONLY',
       'SET SESSION MAX_EXECUTION_TIME = 2500',
     ]);
+    // MAX_EXECUTION_TIME does not abort SLEEP(); runner watchdog does. See README.
   });
 
   it('rejects non-integer timeouts so they cannot be interpolated into SQL', () => {
