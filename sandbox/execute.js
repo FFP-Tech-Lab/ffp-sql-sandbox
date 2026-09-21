@@ -5,6 +5,7 @@ import { createStreamLimiter } from './stream-limit.js';
 import { sessionSetupStatements } from './session-setup.js';
 import { readPassword } from './secrets.js';
 import { writeEvent, writeRunnerError } from './events.js';
+import { streamPgQuery } from './pg-query-stream.js';
 
 async function readStdin() {
   const chunks = [];
@@ -63,58 +64,8 @@ async function runPostgres({ host, port, user, password, database, sql, timeoutM
 }
 
 function streamPg(client, sql, limiter) {
-  return new Promise((resolve, reject) => {
-    const query = new pg.Query({ text: sql, rowMode: 'array' });
-    let settled = false;
-
-    const finish = () => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      resolve();
-    };
-
-    query.on('fields', (fields) => {
-      writeEvent({ type: 'meta', columns: fields.map((field) => field.name) });
-    });
-
-    query.on('row', (row) => {
-      if (settled) {
-        return;
-      }
-      const decision = limiter.push(row);
-      if (!decision.accept) {
-        writeEvent({
-          type: 'end',
-          truncated: true,
-          reason: decision.reason,
-        });
-        finish();
-        client.connection?.stream?.destroy?.();
-        return;
-      }
-      writeEvent({ type: 'row', values: row });
-    });
-
-    query.on('end', () => {
-      if (settled) {
-        return;
-      }
-      writeEvent({ type: 'end', truncated: false });
-      finish();
-    });
-
-    query.on('error', (err) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      reject(err);
-    });
-
-    client.query(query);
-  });
+  const query = new pg.Query({ text: sql, rowMode: 'array' });
+  return streamPgQuery(query, client, limiter);
 }
 
 async function runMysql({ host, port, user, password, database, sql, timeoutMs, limiter }) {
