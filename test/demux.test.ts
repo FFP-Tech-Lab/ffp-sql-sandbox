@@ -48,4 +48,47 @@ describe('demuxStdout (Tty:false always multiplexed)', () => {
     const output = await collect(demuxStdout(Readable.from([stderrFrame])));
     assert.equal(output.toString('utf8'), errorLine);
   });
+
+  it('does not splice stderr bytes into the middle of a stdout NDJSON line', async () => {
+    const meta = '{"type":"meta","columns":["SLEEP(15)"]}\n';
+    const row = '{"type":"row","values":[0]}\n';
+    const frames = [
+      dockerMuxFrame(1, meta.slice(0, 20)),
+      dockerMuxFrame(2, 'mysqld: got signal 9\n'),
+      dockerMuxFrame(1, meta.slice(20) + row),
+    ];
+    const output = await collect(demuxStdout(Readable.from(frames)));
+    const lines = output
+      .toString('utf8')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+
+    const parsed: unknown[] = [];
+    for (const line of lines) {
+      if (!line.startsWith('{')) {
+        continue;
+      }
+      parsed.push(JSON.parse(line));
+    }
+
+    const events = parsed.filter(
+      (event): event is { type: string } =>
+        typeof event === 'object' && event !== null && 'type' in event,
+    );
+    assert.equal(
+      events.some((event) => event.type === 'meta'),
+      true,
+      `expected intact meta line, got ${JSON.stringify(lines)}`,
+    );
+    assert.equal(
+      events.some((event) => event.type === 'row'),
+      true,
+      `expected intact row line, got ${JSON.stringify(lines)}`,
+    );
+    const metaEvent = events.find((event) => event.type === 'meta') as {
+      columns?: unknown;
+    };
+    assert.deepEqual(metaEvent.columns, ['SLEEP(15)']);
+  });
 });

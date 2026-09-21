@@ -25,6 +25,15 @@ describe('default image digest pin', () => {
     );
   });
 
+  it('copies MySQL timeout helper modules into the runner image', () => {
+    const dockerfile = readFileSync(
+      new URL('../sandbox/Dockerfile', import.meta.url),
+      'utf8',
+    );
+    assert.match(dockerfile, /mysql-query-stream\.js/);
+    assert.match(dockerfile, /query-watchdog\.js/);
+  });
+
   it('treats a custom image override as untrusted', async () => {
     let createdImage: string | undefined;
     const docker: DockerLike = {

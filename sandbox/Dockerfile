@@ -6,7 +6,7 @@ WORKDIR /sandbox
 COPY package.json ./
 RUN npm install --omit=dev && npm cache clean --force
 
-COPY execute.js stream-limit.js session-setup.js secrets.js events.js pg-query-stream.js ./
+COPY execute.js stream-limit.js session-setup.js secrets.js events.js pg-query-stream.js mysql-query-stream.js query-watchdog.js ./
 
 USER node
 

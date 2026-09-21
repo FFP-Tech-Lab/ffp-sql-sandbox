@@ -4,8 +4,12 @@ import mysql from 'mysql2/promise';
 import { createStreamLimiter } from './stream-limit.js';
 import { sessionSetupStatements } from './session-setup.js';
 import { readPassword } from './secrets.js';
-import { writeEvent, writeRunnerError } from './events.js';
+import { writeRunnerError } from './events.js';
 import { streamPgQuery } from './pg-query-stream.js';
+import {
+  closeMysqlConnection,
+  runMysqlQuery,
+} from './mysql-query-stream.js';
 
 async function readStdin() {
   const chunks = [];
@@ -81,69 +85,10 @@ async function runMysql({ host, port, user, password, database, sql, timeoutMs, 
     for (const statement of sessionSetupStatements('mysql', timeoutMs)) {
       await conn.query(statement);
     }
-    await streamMysql(conn, sql, limiter);
+    await runMysqlQuery(conn, sql, timeoutMs, limiter);
   } finally {
-    try {
-      await conn.end();
-    } catch {
-      conn.destroy();
-    }
+    await closeMysqlConnection(conn);
   }
-}
-
-function streamMysql(conn, sql, limiter) {
-  return new Promise((resolve, reject) => {
-    const connection = conn.connection;
-    const query = connection.query({ sql, rowsAsArray: true });
-    let settled = false;
-
-    const finish = () => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      resolve();
-    };
-
-    query.on('fields', (fields) => {
-      const columns = (fields ?? []).map((field) => field.name);
-      writeEvent({ type: 'meta', columns });
-    });
-
-    query.on('result', (row) => {
-      if (settled) {
-        return;
-      }
-      const values = Array.isArray(row) ? row : Object.values(row);
-      const decision = limiter.push(values);
-      if (!decision.accept) {
-        writeEvent({
-          type: 'end',
-          truncated: true,
-          reason: decision.reason,
-        });
-        connection.destroy();
-        finish();
-        return;
-      }
-      writeEvent({ type: 'row', values });
-    });
-
-    query.on('end', () => {
-      if (!settled) {
-        writeEvent({ type: 'end', truncated: false });
-        finish();
-      }
-    });
-
-    query.on('error', (err) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      reject(err);
-    });
-  });
 }
 
 async function main() {

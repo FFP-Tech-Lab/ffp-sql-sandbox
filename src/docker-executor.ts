@@ -9,12 +9,13 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Docker from 'dockerode';
-import { consumeNdjsonResult } from './stream-consumer.js';
+import { consumeNdjsonResult, type ConsumeResult } from './stream-consumer.js';
 import {
   demuxStdout,
   type DockerLike,
   type DockerRunRequest,
 } from './docker-types.js';
+import { isTimeoutError } from './timeout-error.js';
 import type { ExecuteSqlResult } from './types.js';
 
 export type { DockerLike, DockerRunRequest } from './docker-types.js';
@@ -116,7 +117,7 @@ export async function runInSandbox(
       },
     });
 
-    const wait = container.wait();
+    const wait = container.wait().catch(() => ({ StatusCode: -1 }));
     let hangTimer: ReturnType<typeof setTimeout> | undefined;
     const hang = new Promise<never>((_, reject) => {
       hangTimer = setTimeout(() => {
@@ -125,59 +126,41 @@ export async function runInSandbox(
       }, containerTimeoutMs + 50);
     });
 
-    let result: {
-      data: Awaited<typeof consumed>;
-      status: { StatusCode: number };
-    };
     try {
-      result = await Promise.race([
-        Promise.all([consumed, wait]).then(([data, status]) => ({
-          data,
-          status,
-        })),
-        hang,
-      ]);
+      const data = await Promise.race([consumed, hang]);
+      if (timedOut) {
+        return timeoutResult(request.timeoutMs);
+      }
+      if (isTimeoutError(data.error)) {
+        return timeoutResult(request.timeoutMs, data.error);
+      }
+      if (data.truncated || killedForLimit) {
+        return successResult(data);
+      }
+      if (data.error) {
+        return { ok: false, code: 'EXECUTION_FAILED', error: data.error };
+      }
+
+      const status = await Promise.race([wait, hang]);
+      if (timedOut) {
+        return timeoutResult(request.timeoutMs);
+      }
+      if (status.StatusCode !== 0) {
+        return {
+          ok: false,
+          code: 'EXECUTION_FAILED',
+          error: data.error ?? 'Sandbox runner exited with a non-zero status',
+        };
+      }
+      return successResult(data);
     } finally {
       if (hangTimer !== undefined) {
         clearTimeout(hangTimer);
       }
     }
-
-    if (timedOut) {
-      return {
-        ok: false,
-        code: 'TIMEOUT',
-        error: `SQL execution timed out after ${request.timeoutMs}ms (container kill + statement_timeout)`,
-      };
-    }
-
-    if (result.data.error) {
-      return { ok: false, code: 'EXECUTION_FAILED', error: result.data.error };
-    }
-
-    if (result.status.StatusCode !== 0 && !result.data.truncated && !killedForLimit) {
-      return {
-        ok: false,
-        code: 'EXECUTION_FAILED',
-        error: result.data.error ?? 'Sandbox runner exited with a non-zero status',
-      };
-    }
-
-    const data: { columns: string[]; rows: unknown[][]; truncated?: boolean } = {
-      columns: result.data.columns,
-      rows: result.data.rows,
-    };
-    if (result.data.truncated) {
-      data.truncated = true;
-    }
-    return { ok: true, data };
   } catch (err) {
     if (timedOut) {
-      return {
-        ok: false,
-        code: 'TIMEOUT',
-        error: `SQL execution timed out after ${request.timeoutMs}ms (container kill + statement_timeout)`,
-      };
+      return timeoutResult(request.timeoutMs);
     }
     if (isImageUnavailableError(err)) {
       return {
@@ -268,6 +251,41 @@ function isImageUnavailableError(err: unknown): boolean {
     /no such image/i.test(msg) ||
     /\(HTTP code 404\).*image/i.test(msg)
   );
+}
+
+function timeoutResult(timeoutMs: number, detail?: string): ExecuteSqlResult {
+  if (detail !== undefined && detail !== '') {
+    return {
+      ok: false,
+      code: 'TIMEOUT',
+      error: `SQL execution timed out after ${timeoutMs}ms: ${detail}`,
+    };
+  }
+  return {
+    ok: false,
+    code: 'TIMEOUT',
+    error: `SQL execution timed out after ${timeoutMs}ms (container kill + statement_timeout)`,
+  };
+}
+
+function successResult(data: ConsumeResult): ExecuteSqlResult {
+  if (data.truncated) {
+    return {
+      ok: true,
+      data: {
+        columns: data.columns,
+        rows: data.rows,
+        truncated: true,
+      },
+    };
+  }
+  return {
+    ok: true,
+    data: {
+      columns: data.columns,
+      rows: data.rows,
+    },
+  };
 }
 
 function imageUnavailableMessage(request: DockerRunRequest): string {
