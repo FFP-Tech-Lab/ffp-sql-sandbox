@@ -10,13 +10,32 @@ import { consumeNdjsonResult } from '../src/stream-consumer.js';
 
 describe('readPassword secret-file-only', () => {
   it('throws when the secret file is missing even if payload.password is present', () => {
-    assert.throws(
-      () =>
-        readPassword('/no/such/ffp-sql-sandbox-secret', {
+    assertFailClosedSecret(() =>
+      readPassword('/no/such/ffp-sql-sandbox-secret', {
+        password: 'from-stdin-payload',
+      }),
+    );
+  });
+
+  it('throws when the secret file is empty even if payload.password is present', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ffp-sql-sandbox-'));
+    const path = join(dir, 'db_password');
+    try {
+      writeFileSync(path, '', 'utf8');
+      assertFailClosedSecret(() =>
+        readPassword(path, {
           password: 'from-stdin-payload',
         }),
-      /bind-mounted secret at \/run\/secrets\/db_password/,
-    );
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not fall back to payload.password', () => {
+    const src = readFileSync(new URL('../sandbox/secrets.js', import.meta.url), 'utf8');
+    assert.doesNotMatch(src, /payload\.password/);
+    assert.doesNotMatch(src, /tmpfs/i);
   });
 
   it('reads only the secret file', () => {
@@ -82,3 +101,24 @@ describe('runner error events on stdout', () => {
     assert.doesNotMatch(src, /stderr\.write/);
   });
 });
+
+const BIND_MOUNTED_SECRET_MESSAGE =
+  'Database password missing (expected bind-mounted secret at /run/secrets/db_password)';
+
+function assertFailClosedSecret(fn: () => unknown): void {
+  try {
+    fn();
+  } catch (err) {
+    assert.ok(err instanceof Error);
+    assert.match(err.message, /missing/i);
+    assert.match(err.message, /secret|db_password/);
+    assert.match(
+      err.message,
+      /bind-mounted secret at \/run\/secrets\/db_password/,
+    );
+    assert.doesNotMatch(err.message, /tmpfs/i);
+    assert.equal(err.message, BIND_MOUNTED_SECRET_MESSAGE);
+    return;
+  }
+  assert.fail('expected readPassword to throw');
+}
