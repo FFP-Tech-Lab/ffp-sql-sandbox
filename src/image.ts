@@ -9,7 +9,7 @@ const DIGEST_PINNED = /^.+@sha256:[a-f0-9]{64}$/i;
  * overrides are untrusted.
  */
 export const DEFAULT_SANDBOX_IMAGE =
-  'ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner@sha256:13cc50f33c2d00a9ae464f3742c49a18a6b2750fdc39c23d68022476c79171a9';
+  'ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner@sha256:d8347adb65417b00d6395a77a2e3a53a2fc15b231ca47dd8646b77416563112c';
 
 export function isDigestPinnedImage(image: string): boolean {
   return DIGEST_PINNED.test(image.trim());
