@@ -84,7 +84,7 @@ Wire framework DI, secret decryption, and result mapping in the host — see [IN
 Default runner is on GHCR, digest-pinned as `DEFAULT_SANDBOX_IMAGE`:
 
 ```bash
-docker pull ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner@sha256:d8347adb65417b00d6395a77a2e3a53a2fc15b231ca47dd8646b77416563112c
+docker pull ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner@sha256:57767f4e80e9f5c6066eeaf996f3101c7ce4ea2740538c06523eeaaf0b15feb6
 # convenience tags (same image): :v1 and :0.1.0 — image tags, not the npm package version
 docker pull ghcr.io/ffp-tech-lab/ffp-sql-sandbox-runner:v1
 ```
