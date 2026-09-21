@@ -1,5 +1,14 @@
+import {
+  accessSync,
+  chmodSync,
+  constants,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import Docker from 'dockerode';
-import { createPasswordTar } from './password-tar.js';
 import { consumeNdjsonResult } from './stream-consumer.js';
 import {
   demuxStdout,
@@ -12,6 +21,8 @@ export type { DockerLike, DockerRunRequest } from './docker-types.js';
 
 const CONTAINER_KILL_GRACE_MS = 2_000;
 const SECRET_MOUNT = '/run/secrets';
+const SECRET_FILENAME = 'db_password';
+const SECRET_CONTAINER_PATH = `${SECRET_MOUNT}/${SECRET_FILENAME}`;
 
 export function createDefaultDocker(): DockerLike {
   return new Docker() as unknown as DockerLike;
@@ -27,11 +38,17 @@ export async function runInSandbox(
   let killedForLimit = false;
   let attachStream: NodeJS.ReadWriteStream | NodeJS.ReadableStream | null =
     null;
+  let secretDir: string | undefined;
 
   const containerTimeoutMs = request.timeoutMs + CONTAINER_KILL_GRACE_MS;
   let killTimer: ReturnType<typeof setTimeout> | undefined;
 
   try {
+    // Bind-mount a host ephemeral file. Docker putArchive writes into the
+    // image layer *beneath* mounts, so tmpfs + putArchive left /run/secrets
+    // empty inside the container.
+    const staged = stageHostSecret(request.password);
+    secretDir = staged.dir;
     container = await docker.createContainer({
       Image: request.image,
       AttachStdin: true,
@@ -51,9 +68,14 @@ export async function runInSandbox(
         CapDrop: ['ALL'],
         SecurityOpt: ['no-new-privileges:true'],
         PidsLimit: 256,
-        Tmpfs: {
-          [SECRET_MOUNT]: 'rw,noexec,nosuid,size=1m,mode=0700,uid=1000,gid=1000',
-        },
+        Mounts: [
+          {
+            Type: 'bind',
+            Source: staged.filePath,
+            Target: SECRET_CONTAINER_PATH,
+            ReadOnly: true,
+          },
+        ],
       },
       Labels: {
         'ffp.sql-sandbox': 'v1',
@@ -66,9 +88,6 @@ export async function runInSandbox(
       void container?.kill().catch(() => undefined);
       destroyStream(attachStream);
     }, containerTimeoutMs);
-    await container.putArchive(createPasswordTar(request.password), {
-      path: SECRET_MOUNT,
-    });
 
     attachStream = await container.attach({
       stream: true,
@@ -189,6 +208,41 @@ export async function runInSandbox(
         // already removed
       }
     }
+    removeHostSecret(secretDir);
+  }
+}
+
+function stageHostSecret(password: string): { dir: string; filePath: string } {
+  const dir = mkdtempSync(join(hostSecretParent(), 'ffp-sql-sandbox-'));
+  try {
+    chmodSync(dir, 0o700);
+    const filePath = join(dir, SECRET_FILENAME);
+    writeFileSync(filePath, password, { encoding: 'utf8', mode: 0o444 });
+    chmodSync(filePath, 0o444);
+    return { dir, filePath };
+  } catch (err) {
+    removeHostSecret(dir);
+    throw err;
+  }
+}
+
+function hostSecretParent(): string {
+  try {
+    accessSync('/dev/shm', constants.W_OK);
+    return '/dev/shm';
+  } catch {
+    return tmpdir();
+  }
+}
+
+function removeHostSecret(dir: string | undefined): void {
+  if (!dir) {
+    return;
+  }
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // best-effort; container teardown still proceeds
   }
 }
 

@@ -8,14 +8,14 @@ import { readPassword } from '../sandbox/secrets.js';
 import { encodeRunnerEvent, writeRunnerError } from '../sandbox/events.js';
 import { consumeNdjsonResult } from '../src/stream-consumer.js';
 
-describe('readPassword tmpfs-only', () => {
+describe('readPassword secret-file-only', () => {
   it('throws when the secret file is missing even if payload.password is present', () => {
     assert.throws(
       () =>
         readPassword('/no/such/ffp-sql-sandbox-secret', {
           password: 'from-stdin-payload',
         }),
-      /tmpfs secret file/,
+      /bind-mounted secret at \/run\/secrets\/db_password/,
     );
   });
 
@@ -41,7 +41,8 @@ describe('runner error events on stdout', () => {
   it('encodes errors as NDJSON that the host consumer treats as an error result', async () => {
     const line = encodeRunnerEvent({
       type: 'error',
-      error: 'Database password missing (expected tmpfs secret file)',
+      error:
+        'Database password missing (expected bind-mounted secret at /run/secrets/db_password)',
     });
     const stream = new PassThrough();
     queueMicrotask(() => {
@@ -54,7 +55,7 @@ describe('runner error events on stdout', () => {
     });
     assert.equal(
       result.error,
-      'Database password missing (expected tmpfs secret file)',
+      'Database password missing (expected bind-mounted secret at /run/secrets/db_password)',
     );
   });
 

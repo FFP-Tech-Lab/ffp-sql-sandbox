@@ -1,6 +1,7 @@
 /**
  * Build a ustar archive containing a single file `db_password`.
- * Used to drop the DB password onto the container tmpfs (never Env).
+ * Kept for tests that model Docker `putArchive` (which writes under mounts).
+ * Production secret delivery is a host bind-mount, not putArchive.
  */
 export function createPasswordTar(password: string, uid = 1000): Buffer {
   const content = Buffer.from(password, 'utf8');
