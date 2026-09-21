@@ -1,9 +1,14 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { PassThrough } from 'node:stream';
 import { describe, it } from 'node:test';
 import { executeSql } from '../src/execute-sql.js';
 import type { ExecuteSqlDeps, ExecuteSqlInput } from '../src/execute-sql.js';
 import type { DockerLike } from '../src/docker-executor.js';
+import {
+  filesVisibleAfterStart,
+  filesVisibleToContainerProcess,
+} from './docker-secret-overlay.js';
 
 const SECRET = 'super-secret-password';
 
@@ -82,12 +87,12 @@ function createMockDocker(options: {
       }
     },
     async createContainer(createOpts: Record<string, unknown>) {
-      if (options.createError) {
-        throw options.createError;
-      }
       state.created = createOpts;
       state.env = (createOpts.Env as string[] | undefined) ?? [];
       options.onCreate?.(createOpts);
+      if (options.createError) {
+        throw options.createError;
+      }
 
       let settleWait: ((status: { StatusCode: number }) => void) | undefined;
       const container: FakeContainer = {
@@ -256,7 +261,16 @@ describe('executeSql Docker availability and secrets', () => {
       '{"type":"end","truncated":false}',
       '',
     ].join('\n');
-    const { docker, state } = createMockDocker({ stdout: ndjson });
+    let bindSnapshot = new Map<string, Buffer>();
+    const { docker, state } = createMockDocker({
+      stdout: ndjson,
+      onCreate(opts) {
+        bindSnapshot = filesVisibleToContainerProcess({
+          createOpts: opts,
+          putArchives: [],
+        });
+      },
+    });
     const result = await executeSql(baseInput(), { docker });
     assert.equal(result.ok, true);
     assert.ok(state.env.length > 0);
@@ -266,11 +280,114 @@ describe('executeSql Docker availability and secrets', () => {
     }
     const inspectDump = JSON.stringify(state.created);
     assert.equal(inspectDump.includes(SECRET), false);
-    assert.ok(state.putArchives.length >= 1);
-    assert.equal(state.putArchives[0]?.path, '/run/secrets');
-    assert.ok(state.putArchives[0]?.tar.includes(Buffer.from(SECRET)));
+    const visible = filesVisibleAfterStart({
+      createOpts: state.created,
+      putArchives: state.putArchives,
+      bindSnapshot,
+    });
+    assert.equal(
+      visible.get('/run/secrets/db_password')?.toString('utf8'),
+      SECRET,
+    );
+    const hostConfig = (state.created?.HostConfig ?? {}) as {
+      Mounts?: Array<{ Type?: string; Target?: string; ReadOnly?: boolean }>;
+    };
+    const secretMount = (hostConfig.Mounts ?? []).find(
+      (mount) => mount.Target === '/run/secrets/db_password',
+    );
+    assert.equal(secretMount?.Type, 'bind');
+    assert.equal(secretMount?.ReadOnly, true);
+  });
+
+  it('does not hide the password under a tmpfs mount of /run/secrets via putArchive', async () => {
+    const ndjson = [
+      '{"type":"meta","columns":["?column?"]}',
+      '{"type":"row","values":[1]}',
+      '{"type":"end","truncated":false}',
+      '',
+    ].join('\n');
+    const { docker, state } = createMockDocker({ stdout: ndjson });
+    const result = await executeSql(baseInput(), { docker });
+    assert.equal(result.ok, true);
+    const hostConfig = (state.created?.HostConfig ?? {}) as {
+      Tmpfs?: Record<string, string>;
+    };
+    const tmpfsCoversSecrets = Object.keys(hostConfig.Tmpfs ?? {}).some(
+      (target) => target === '/run/secrets' || target === '/run/secrets/',
+    );
+    const usedPutArchiveOnSecrets = state.putArchives.some(
+      (archive) =>
+        archive.path === '/run/secrets' || archive.path === '/run/secrets/',
+    );
+    assert.equal(
+      tmpfsCoversSecrets && usedPutArchiveOnSecrets,
+      false,
+      'putArchive into a tmpfs-mounted /run/secrets is invisible to the container process',
+    );
+  });
+
+  it('removes the host secret file after the container is torn down', async () => {
+    const ndjson = [
+      '{"type":"meta","columns":["?column?"]}',
+      '{"type":"row","values":[1]}',
+      '{"type":"end","truncated":false}',
+      '',
+    ].join('\n');
+    let secretSource: string | undefined;
+    const { docker } = createMockDocker({
+      stdout: ndjson,
+      onCreate(opts) {
+        secretSource = bindSourceForSecret(opts);
+      },
+    });
+    const result = await executeSql(baseInput(), { docker });
+    assert.equal(result.ok, true);
+    assert.equal(typeof secretSource, 'string');
+    assert.equal(existsSync(secretSource ?? ''), false);
+  });
+
+  it('removes the host secret file when createContainer fails', async () => {
+    let secretSource: string | undefined;
+    const { docker } = createMockDocker({
+      createError: new Error('create failed'),
+      onCreate(opts) {
+        secretSource = bindSourceForSecret(opts);
+      },
+    });
+    const result = await executeSql(baseInput(), { docker });
+    assert.equal(result.ok, false);
+    assert.equal(typeof secretSource, 'string');
+    assert.equal(existsSync(secretSource ?? ''), false);
   });
 });
+
+function bindSourceForSecret(
+  createOpts: Record<string, unknown>,
+): string | undefined {
+  const hostConfig = (createOpts.HostConfig ?? {}) as {
+    Mounts?: Array<{ Type?: string; Source?: string; Target?: string }>;
+    Binds?: string[];
+  };
+  for (const mount of hostConfig.Mounts ?? []) {
+    if (
+      mount.Type === 'bind' &&
+      (mount.Target === '/run/secrets/db_password' ||
+        mount.Target === '/run/secrets')
+    ) {
+      return mount.Source;
+    }
+  }
+  for (const entry of hostConfig.Binds ?? []) {
+    const parts = entry.split(':');
+    if (
+      parts[1] === '/run/secrets/db_password' ||
+      parts[1] === '/run/secrets'
+    ) {
+      return parts[0];
+    }
+  }
+  return undefined;
+}
 
 describe('executeSql timeout path', () => {
   it('sets QUERY_TIMEOUT and kills the container at timeoutMs+2000', async () => {

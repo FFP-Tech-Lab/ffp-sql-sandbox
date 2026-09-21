@@ -25,12 +25,14 @@ Alternatively, pass the original host (`localhost`, `db.internal`, …) in `conn
 
 | Naive sandbox | v1 library |
 | --- | --- |
-| Password in container `Env` (`DB_PASS`, `PGPASSWORD`, …) | Forbidden. Password goes to tmpfs `/run/secrets/db_password`. |
+| Password in container `Env` (`DB_PASS`, `PGPASSWORD`, …) | Forbidden. Password is a host ephemeral file bind-mounted read-only at `/run/secrets/db_password`. |
 | `Cmd: [sql]` | SQL on stdin JSON. |
 | Floating image tag (`:latest`) | Default image digest-pinned; custom `image` is untrusted. |
 | Configurable validator prefixes/patterns | Not exposed. `validateSql(sql)` only. |
 | Wait for container + `logs()` then parse/truncate | Streaming attach; `maxRows` / `maxBytes` applied as data arrives. |
 | Regex as the security proof | Documented as fail-fast only. Proof is RO role + limits + allowlist. |
+
+`executeSql` writes `connection.password` to a host temp file (0444 in a 0700 directory, preferring `/dev/shm`) and bind-mounts it read-only at `/run/secrets/db_password`. Docker `putArchive` cannot land a file onto a tmpfs mount — it writes under the mount, which is what made the runner report `Database password missing`. The Docker engine must be able to see that host path (local engine or Docker Desktop shared filesystem).
 
 ## Image
 

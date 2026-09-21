@@ -33,7 +33,7 @@ FFP Tech Lab ships primitives you can reason about. This is one of them.
 | Proof over ceremony | Safety claims map to concrete mechanisms (read-only DB role, container limits, streaming caps, host allowlist) — not to `validateSql` returning `{ ok: true }`. |
 | Fail closed | Empty allowlist denies all. Missing Docker fails loudly. Soft “fall back to in-process SQL” is not an option. |
 | Streaming limits, not post-hoc truncate | `maxRows` / `maxBytes` apply as rows arrive. Buffering the full result and then slicing is not the limits implementation. |
-| Secrets stay out of `Env` | The password goes to tmpfs (`/run/secrets/db_password`). SQL rides stdin JSON. `docker inspect` should not print credentials. |
+| Secrets stay out of `Env` | The password is a host ephemeral file bind-mounted read-only at `/run/secrets/db_password` (never container Env). SQL rides stdin JSON. `docker inspect` should not print credentials. |
 | Honest non-goals | We do not claim absolute network isolation, a full SQL AST, or that regex is authorization. |
 
 `validateSql` is a **cheap fail-fast** for obvious writes and multi-statement junk — not the proof. Treat `{ ok: true }` as “not obviously broken,” never as “safe to run outside this sandbox.”
