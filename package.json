@@ -1,7 +1,19 @@
 {
   "name": "ffp-sql-sandbox",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Read-only SQL sandbox primitives: fail-fast validateSql + Docker executeSql with hard limits",
+  "keywords": [
+    "sql",
+    "sandbox",
+    "docker",
+    "typescript",
+    "postgresql",
+    "mysql",
+    "npm",
+    "read-only",
+    "text-to-sql",
+    "ai-agents"
+  ],
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
